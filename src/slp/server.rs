@@ -3,13 +3,10 @@ use tokio::net::{UdpSocket, udp::RecvHalf};
 use tokio::sync::{RwLock, mpsc};
 use std::net::{SocketAddr, Ipv4Addr};
 use std::sync::Arc;
-use super::{Event, SendLANEvent, Peer as InnerPeer, log_err, log_warn, ForwarderFrame, Parser};
+use super::{Event, SendLANEvent, Peer, log_err, log_warn, ForwarderFrame, Parser, PeerManager};
 use std::collections::HashMap;
 use serde::Serialize;
 use juniper::GraphQLObject;
-use std::time::{Instant, Duration};
-
-const IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// Infomation about this server
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, GraphQLObject)]
@@ -20,47 +17,6 @@ pub struct ServerInfo {
     idle: i32,
     /// The version of the server
     version: String,
-}
-
-#[derive(Debug, PartialEq)]
-enum PeerState {
-    Connected(Instant),
-    Idle,
-}
-
-impl PeerState {
-    fn is_connected(&self) -> bool {
-        match self {
-            &PeerState::Connected(_) => true,
-            _ => false,
-        }
-    }
-    fn is_idle(&self) -> bool {
-        match self {
-            &PeerState::Idle => true,
-            _ => false,
-        }
-    }
-}
-
-struct Peer {
-    state: PeerState,
-    peer: InnerPeer,
-}
-
-impl Peer {
-    fn new(inner: InnerPeer) -> Self {
-        Self {
-            state: PeerState::Idle,
-            peer: inner,
-        }
-    }
-}
-
-impl From<InnerPeer> for Peer {
-    fn from(inner: InnerPeer) -> Self {
-        Self::new(inner)
-    }
 }
 
 struct InnerServer {
@@ -95,6 +51,7 @@ pub struct UDPServerConfig {
 #[derive(Clone)]
 pub struct UDPServer {
     inner: Arc<RwLock<InnerServer>>,
+    peer_manager: Arc<PeerManager>,
 }
 
 impl UDPServer {
@@ -146,18 +103,10 @@ impl UDPServer {
             }
             log::error!("event down");
         });
-        // tokio::spawn(
-        //     tokio::time::interval(
-        //         Duration::from_secs(15)
-        //     )
-        //     .for_each(|_| async {
-
-        //     })
-        //     .boxed()
-        // );
 
         Ok(Self {
             inner,
+            peer_manager: Arc::new(PeerManager::new(send_half, config.ignore_idle)),
         })
     }
     async fn recv(mut recv: RecvHalf, inner: Arc<RwLock<InnerServer>>, mut event_send: mpsc::Sender<Event>) -> Result<()> {
@@ -182,30 +131,12 @@ impl UDPServer {
                 if cache.get(&addr).is_none() {
                     cache.insert(
                         addr,
-                        InnerPeer::new(addr, event_send.clone()).into()
+                        Peer::new(addr, event_send.clone())
                     );
                 }
                 cache.get_mut(&addr).unwrap()
             };
-            let now = Instant::now();
-            let state = match (frame, &peer.state) {
-                (ForwarderFrame::Ipv4(..), _) | (ForwarderFrame::Ipv4Frag(..), _) => {
-                    Some(PeerState::Connected(now))
-                },
-                (_, PeerState::Connected(last_time)) if now.duration_since(*last_time) < IDLE_TIMEOUT => {
-                    None
-                },
-                (_, PeerState::Connected(_)) => {
-                    Some(PeerState::Idle)
-                },
-                _ => {
-                    None
-                },
-            };
-            if let Some(state) = state {
-                peer.state = state;
-            }
-            peer.peer.on_packet(buffer);
+            peer.on_packet(buffer);
         }
     }
     pub async fn server_info(&self) -> ServerInfo {

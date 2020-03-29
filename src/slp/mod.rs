@@ -1,11 +1,15 @@
 mod server;
 mod frame;
 mod peer;
+mod peer_manager;
 
 pub use server::*;
 pub use frame::*;
 pub use peer::*;
+pub use peer_manager::*;
 use std::net::{SocketAddr, Ipv4Addr};
+
+pub type Packet = Vec<u8>;
 
 #[derive(Debug)]
 pub struct SendLANEvent {
